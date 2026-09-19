@@ -11,7 +11,7 @@ import (
 	"golang.org/x/sys/windows"
 	"golang.zx2c4.com/wintun"
 
-	"github.com/amnezia-vpn/amneziawg-go/tun"
+	"github.com/amnezia-vpn/amneziawg-go/v3/tun"
 )
 
 // nativeTunLayout mirrors tun.NativeTun field offsets for unsafe access.

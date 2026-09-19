@@ -17,6 +17,12 @@ func Up(profileName string) error {
 		return fmt.Errorf("load profile %q: %w\nRun 'warp-cli register --profile %s' first", profileName, err, profileName)
 	}
 
+	if config.IsWarpEndpoint(profile.Endpoint) {
+		for _, w := range config.WarpUnsafeAWG(profile.AWG) {
+			fmt.Printf("WARNING: %s — incompatible with Cloudflare WARP\n", w)
+		}
+	}
+
 	wc := warp.NewClient()
 	token := profile.Token
 	accID := profile.AccountID

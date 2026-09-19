@@ -42,6 +42,8 @@ var scanSubnets = []string{
 	"8.39.204.0/24",
 	"8.39.214.0/24",
 	"8.47.69.0/24",
+	// From RR-WARP-Scanner pool (confirmed live WARP front)
+	"162.159.204.0/24",
 }
 
 // fullASSubnets extends scanSubnets with all remaining Cloudflare AS prefixes
@@ -63,6 +65,11 @@ var fullASSubnets = []string{
 	"188.114.208.0/20",   // 4094 IPs — .208-.223
 	"188.114.224.0/20",   // 4094 IPs — .224-.239
 	"188.114.240.0/20",   // 4094 IPs — .240-.255
+	// WarpMiner-listed WARP front ranges (anycast edge, may host WARP)
+	"141.101.112.0/24",
+	"141.101.113.0/24",
+	"141.101.114.0/24",
+	"141.101.115.0/24",
 }
 
 var scanPortList = []int{
@@ -70,8 +77,8 @@ var scanPortList = []int{
 	854, 859, 864, 878, 880, 890, 891, 894, 903, 908,
 	928, 934, 939, 942, 943, 945, 946, 955, 968, 987,
 	988, 1002, 1010, 1014, 1018, 1070, 1074, 1180, 1387,
-	1843, 2371, 2506, 3138, 3476, 3581, 3854, 4177, 4198,
-	4233, 5279, 5956, 7103, 7152, 7156, 7281, 7559, 8319,
+	1843, 2371, 2506, 3138, 3476, 3581, 3854, 4099, 4177, 4198,
+	4233, 5279, 5500, 5956, 7103, 7152, 7156, 7281, 7559, 8319,
 	8742, 8854, 8886,
 }
 
@@ -80,9 +87,13 @@ var fastPorts = []int{2408, 500, 1701, 4500, 1002, 7281, 3581, 878}
 type ScanResult struct {
 	IP          string
 	Port        int
-	Latency     time.Duration
+	Latency     time.Duration // ICMP latency
 	InCommunity bool
 	CommLatency float64
+	Torn        bool          // tunnel torn down right after handshake (DPI)
+	Verified    bool          // real-tunnel probe completed (Phase 3)
+	TunnelRTT   time.Duration // avg RTT measured through the tunnel
+	TunnelLoss  int           // % packet loss through the tunnel
 }
 
 type ipLatency struct {
@@ -153,65 +164,81 @@ func scanAliveEndpoints(ips []string, ports []int, clientPrivB64, serverPubB64 s
 		return reachable[i].latency < reachable[j].latency
 	})
 
-	// Phase 2: Probe UDP ports via real WireGuard handshake
+	// Phase 2: Probe UDP ports via real WireGuard handshake using discovery order:
+	// standard WARP ports (2408 → 1701 → 4500 → 500) first, then the rest. An IP
+	// stops being probed as soon as one port answers, so typical scans cost far
+	// less than the old 30×N full sweep while producing the same per-IP results.
 	limit := 30
 	if limit > len(reachable) {
 		limit = len(reachable)
 	}
 
-	fmt.Printf("  Phase 2: Checking UDP ports on top %d IPs...\n", limit)
-
-	var probeResults []udpProbeResult
+	tiers := discoveryTiers(ports)
+	probedTotal := 0
+	bestPort := make(map[string]int) // ip -> first alive port in discovery order
 	var mu2 sync.Mutex
-	var wg2 sync.WaitGroup
-	sem2 := make(chan struct{}, scanConcurrency)
-	totalProbes := limit * len(ports)
-	var probeDone int
 
-	for _, r := range reachable[:limit] {
-		for _, port := range ports {
-			wg2.Add(1)
-			sem2 <- struct{}{}
-			go func(ip string, port int, privKey, pubKey string) {
-				defer wg2.Done()
-				defer func() { <-sem2 }()
-				var alive bool
-				if privKey != "" {
-					if awgCfg != nil {
-						alive = udpProbeAWG(ip, port, privKey, pubKey, *awgCfg)
+	fmt.Printf("  Phase 2: Discovering UDP ports on top %d IPs (%d port tiers)...\n", limit, len(tiers))
+
+	needy := reachable[:limit]
+	for ti, tierPorts := range tiers {
+		if len(needy) == 0 {
+			break
+		}
+		var wg2 sync.WaitGroup
+		sem2 := make(chan struct{}, scanConcurrency)
+		tierTotal := len(needy) * len(tierPorts)
+		var tierDone int
+		fmt.Printf("  Phase 2.%d: ports %v on %d IPs...\n", ti+1, tierPorts, len(needy))
+		for _, r := range needy {
+			for _, port := range tierPorts {
+				wg2.Add(1)
+				sem2 <- struct{}{}
+				go func(ip string, port int, privKey, pubKey string) {
+					defer wg2.Done()
+					defer func() { <-sem2 }()
+					var alive bool
+					if privKey != "" {
+						if awgCfg != nil {
+							alive = udpProbeAWG(ip, port, privKey, pubKey, *awgCfg)
+						} else {
+							alive = udpProbeRegistered(ip, port, privKey, pubKey)
+						}
 					} else {
-						alive = udpProbeRegistered(ip, port, privKey, pubKey)
+						alive = udpProbe(ip, port)
 					}
-				} else {
-					alive = udpProbe(ip, port)
-				}
-				mu2.Lock()
-				probeResults = append(probeResults, udpProbeResult{ip: ip, port: port, alive: alive})
-				probeDone++
-				if probeDone%50 == 0 || probeDone == totalProbes {
-					fmt.Printf("\r  Phase 2: [%d/%d]", probeDone, totalProbes)
-				}
-				mu2.Unlock()
-			}(r.ip, port, clientPrivB64, serverPubB64)
+					mu2.Lock()
+					if alive {
+						cur, exists := bestPort[ip]
+						if !exists || port < cur {
+							bestPort[ip] = port
+						}
+					}
+					tierDone++
+					probedTotal++
+					if tierDone%50 == 0 || tierDone == tierTotal {
+						fmt.Printf("\r  Phase 2.%d: [%d/%d]", ti+1, tierDone, tierTotal)
+					}
+					mu2.Unlock()
+				}(r.ip, port, clientPrivB64, serverPubB64)
+			}
 		}
+		wg2.Wait()
+		fmt.Printf("\r  Phase 2.%d: [%d/%d] done\n", ti+1, tierTotal, tierTotal)
+		// Drop IPs that already have a live port from subsequent tiers.
+		var next []ipLatency
+		for _, r := range needy {
+			if _, ok := bestPort[r.ip]; !ok {
+				next = append(next, r)
+			}
+		}
+		needy = next
 	}
-	wg2.Wait()
-	fmt.Printf("\r  Phase 2: [%d/%d] done\n", totalProbes, totalProbes)
-
-	ipBestPort := make(map[string]int)
-	for _, p := range probeResults {
-		if !p.alive {
-			continue
-		}
-		existing := ipBestPort[p.ip]
-		if existing == 0 || p.port == 2408 {
-			ipBestPort[p.ip] = p.port
-		}
-	}
+	fmt.Printf("  Phase 2: done (%d probes)\n", probedTotal)
 
 	var scanResults []ScanResult
 	for _, r := range reachable[:limit] {
-		port, ok := ipBestPort[r.ip]
+		port, ok := bestPort[r.ip]
 		if !ok {
 			continue
 		}
@@ -232,6 +259,40 @@ func scanAliveEndpoints(ips []string, ports []int, clientPrivB64, serverPubB64 s
 	})
 
 	return scanResults
+}
+
+// discoveryTiers orders the port list for adaptive probing: the standard WARP
+// ports become separate single-port tiers (so IPs that answer 2408 are never
+// probed again), and everything else is probed last in the input order.
+func discoveryTiers(ports []int) [][]int {
+	has := func(p int) bool {
+		for _, q := range ports {
+			if q == p {
+				return true
+			}
+		}
+		return false
+	}
+	used := make(map[int]bool)
+	var tiers [][]int
+	for _, p := range []int{2408, 1701, 4500, 500} {
+		if !has(p) {
+			continue
+		}
+		used[p] = true
+		tiers = append(tiers, []int{p})
+	}
+	var rest []int
+	for _, p := range ports {
+		if used[p] {
+			continue
+		}
+		rest = append(rest, p)
+	}
+	if len(rest) > 0 {
+		tiers = append(tiers, rest)
+	}
+	return tiers
 }
 
 // resolveSubnets returns the list of subnets to scan, combining base ranges
@@ -335,6 +396,9 @@ func ScanEndpoints(community, fast, useAWG, fullAS bool) error {
 		return nil
 	}
 
+	// Phase 3: verify top endpoints with a real tunnel (torn-down detection).
+	scanResults = verifyEndpoints(scanResults, profile)
+
 	outLimit := scanTopN
 	if outLimit > len(scanResults) {
 		outLimit = len(scanResults)
@@ -355,21 +419,22 @@ func ScanEndpoints(community, fast, useAWG, fullAS bool) error {
 	fmt.Println()
 
 	if community {
-		fmt.Printf("%-18s %-5s %-8s %-9s\n", "ENDPOINT", "PORT", "LATENCY", "COMMUNITY")
+		fmt.Printf("%-18s %-5s %-8s %-7s %-9s\n", "ENDPOINT", "PORT", "LATENCY", "STATE", "COMMUNITY")
 	} else {
-		fmt.Printf("%-18s %-5s %-8s\n", "ENDPOINT", "PORT", "LATENCY")
+		fmt.Printf("%-18s %-5s %-8s %-7s\n", "ENDPOINT", "PORT", "LATENCY", "STATE")
 	}
 	fmt.Println("--------------------------------------------------")
 	for i := 0; i < outLimit; i++ {
 		r := &scanResults[i]
+		st := stateLabel(r)
 		if community {
 			commMark := ""
 			if r.InCommunity {
 				commMark = "✓"
 			}
-			fmt.Printf("%-18s %-5d %-8s %-9s\n", r.IP, r.Port, r.Latency.Round(time.Millisecond), commMark)
+			fmt.Printf("%-18s %-5d %-8s %-7s %-9s\n", r.IP, r.Port, r.Latency.Round(time.Millisecond), st, commMark)
 		} else {
-			fmt.Printf("%-18s %-5d %-8s\n", r.IP, r.Port, r.Latency.Round(time.Millisecond))
+			fmt.Printf("%-18s %-5d %-8s %-7s\n", r.IP, r.Port, r.Latency.Round(time.Millisecond), st)
 		}
 	}
 
@@ -378,6 +443,20 @@ func ScanEndpoints(community, fast, useAWG, fullAS bool) error {
 	fmt.Printf("  awarp config set --profile <name> --endpoint %s:%d\n", scanResults[0].IP, scanResults[0].Port)
 
 	return nil
+}
+
+// stateLabel summarizes the Phase 3 verification state of an endpoint.
+func stateLabel(r *ScanResult) string {
+	if r.Torn {
+		return "TORN"
+	}
+	if r.Verified {
+		if r.TunnelLoss >= 50 {
+			return "WEAK"
+		}
+		return "OK"
+	}
+	return "-"
 }
 
 // ApplyBestEndpoint scans for the best WARP endpoint and updates the profile.
@@ -458,6 +537,10 @@ func ApplyBestEndpoint(profileName string, useAWG bool, community bool, fast boo
 		return fmt.Errorf("no responding WARP endpoints found, keeping current endpoint %s", profile.Endpoint)
 	}
 
+	// Verify the best candidates through a real tunnel so a "handshake-alive but
+	// torn down" endpoint never wins. verifyEndpoints re-orders results (torn last).
+	results = verifyEndpoints(results, profile)
+
 	best := results[0]
 	endpoint := fmt.Sprintf("%s:%d", best.IP, best.Port)
 	profile.Endpoint = endpoint
@@ -465,7 +548,12 @@ func ApplyBestEndpoint(profileName string, useAWG bool, community bool, fast boo
 		return fmt.Errorf("save profile: %w", err)
 	}
 
-	fmt.Printf("\nOptimized endpoint: %s (latency: %s)\n", endpoint, best.Latency.Round(time.Millisecond))
+	if best.Verified {
+		fmt.Printf("\nOptimized endpoint: %s (ICMP %s, tunnel RTT %s, loss %d%%)\n",
+			endpoint, best.Latency.Round(time.Millisecond), best.TunnelRTT.Round(time.Millisecond), best.TunnelLoss)
+	} else {
+		fmt.Printf("\nOptimized endpoint: %s (latency: %s)\n", endpoint, best.Latency.Round(time.Millisecond))
+	}
 	return nil
 }
 

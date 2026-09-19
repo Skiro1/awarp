@@ -10,12 +10,12 @@ import (
 	"os"
 	"strings"
 
-	"github.com/amnezia-vpn/amneziawg-go/conn"
-	"github.com/amnezia-vpn/amneziawg-go/device"
-	"github.com/amnezia-vpn/amneziawg-go/ipc"
-	"github.com/amnezia-vpn/amneziawg-go/tun"
-	"github.com/amnezia-vpn/amneziawg-windows/tunnel/firewall"
-	"github.com/amnezia-vpn/amneziawg-windows/tunnel/winipcfg"
+	"github.com/amnezia-vpn/amneziawg-go/v3/conn"
+	"github.com/amnezia-vpn/amneziawg-go/v3/device"
+	"github.com/amnezia-vpn/amneziawg-go/v3/ipc"
+	"github.com/amnezia-vpn/amneziawg-go/v3/tun"
+	"github.com/amnezia-vpn/amneziawg-windows/v3/tunnel/firewall"
+	"github.com/amnezia-vpn/amneziawg-windows/v3/tunnel/winipcfg"
 	"golang.org/x/sys/windows"
 	"golang.org/x/sys/windows/svc"
 )
@@ -136,19 +136,15 @@ func (s *warpService) Execute(args []string, r <-chan svc.ChangeRequest, changes
 	log.Println("WireGuard device is up")
 
 	// Step 6b: Bind UDP socket to physical interface (like official client)
-	if mb, ok := bind.(*conn.Multibind); ok {
-		if binder, ok := mb.Bind.(conn.BindSocketToInterface); ok {
-			if phyIdx := findPhysicalInterfaceIndex(wt); phyIdx != 0 {
-				log.Printf("Binding socket to physical interface index %d", phyIdx)
-				if err := binder.BindSocketToInterface4(phyIdx, false); err != nil {
-					log.Printf("WARNING: BindSocketToInterface4: %v", err)
-				}
+	if binder, ok := bind.(conn.BindSocketToInterface); ok {
+		if phyIdx := findPhysicalInterfaceIndex(wt); phyIdx != 0 {
+			log.Printf("Binding socket to physical interface index %d", phyIdx)
+			if err := binder.BindSocketToInterface4(phyIdx, false); err != nil {
+				log.Printf("WARNING: BindSocketToInterface4: %v", err)
 			}
-		} else {
-			log.Println("WARNING: inner bind does not support BindSocketToInterface")
 		}
 	} else {
-		log.Println("WARNING: bind is not Multibind")
+		log.Println("WARNING: bind does not support BindSocketToInterface")
 	}
 
 	// Step 6c: Enable WFP firewall (kill switch + DNS leak protection)
@@ -240,6 +236,8 @@ func configureFromProfile(dev *device.Device, cfg *serviceConfig) error {
 			Jmax int    `json:"jmax"`
 			S1   int    `json:"s1"`
 			S2   int    `json:"s2"`
+			S3   int    `json:"s3"`
+			S4   int    `json:"s4"`
 			H1   string `json:"h1"`
 			H2   string `json:"h2"`
 			H3   string `json:"h3"`
@@ -249,6 +247,17 @@ func configureFromProfile(dev *device.Device, cfg *serviceConfig) error {
 			I3   string `json:"i3"`
 			I4   string `json:"i4"`
 			I5   string `json:"i5"`
+
+			HeaderProtectionKey    string `json:"header_protection_key"`
+			ContentPaddingAddition string `json:"content_padding_addition"`
+			RekeyAfterTime         string `json:"rekey_after_time"`
+			RekeyTimeout           string `json:"rekey_timeout"`
+			RejectAfterTime        string `json:"reject_after_time"`
+			KeepaliveTimeout       string `json:"keepalive_timeout"`
+			MaxHandshakeAttempts   string `json:"max_handshake_attempts"`
+			RandomTrailers         bool   `json:"random_trailers"`
+			DisableCookies         bool   `json:"disable_cookies"`
+			PersistentKeepalive    string `json:"persistent_keepalive"`
 		} `json:"awg"`
 	}
 
@@ -282,8 +291,8 @@ func configureFromProfile(dev *device.Device, cfg *serviceConfig) error {
 	// Device-level: private key + obfuscation params
 	cmd := "private_key=" + privHex
 	if profile.AWG.Jc != 0 {
-		cmd += fmt.Sprintf("\njc=%d\njmin=%d\njmax=%d\ns1=%d\ns2=%d",
-			profile.AWG.Jc, profile.AWG.Jmin, profile.AWG.Jmax, profile.AWG.S1, profile.AWG.S2)
+		cmd += fmt.Sprintf("\njc=%d\njmin=%d\njmax=%d\ns1=%d\ns2=%d\ns3=%d\ns4=%d",
+			profile.AWG.Jc, profile.AWG.Jmin, profile.AWG.Jmax, profile.AWG.S1, profile.AWG.S2, profile.AWG.S3, profile.AWG.S4)
 	}
 	for _, h := range []struct{ name, val string }{
 		{"h1", profile.AWG.H1}, {"h2", profile.AWG.H2},
@@ -298,10 +307,37 @@ func configureFromProfile(dev *device.Device, cfg *serviceConfig) error {
 			cmd += fmt.Sprintf("\ni%d=%s", i+1, v)
 		}
 	}
+	if v := profile.AWG.HeaderProtectionKey; v != "" {
+		cmd += "\nheader_protection_key=" + v
+	}
+	if v := profile.AWG.ContentPaddingAddition; v != "" {
+		cmd += "\ncontent_padding_addition=" + v
+	}
+	for _, t := range []struct{ name, val string }{
+		{"rekey_after_time", profile.AWG.RekeyAfterTime},
+		{"rekey_timeout", profile.AWG.RekeyTimeout},
+		{"reject_after_time", profile.AWG.RejectAfterTime},
+		{"keepalive_timeout", profile.AWG.KeepaliveTimeout},
+		{"max_handshake_attempts", profile.AWG.MaxHandshakeAttempts},
+	} {
+		if t.val != "" {
+			cmd += fmt.Sprintf("\n%s=%s", t.name, t.val)
+		}
+	}
+	if profile.AWG.RandomTrailers {
+		cmd += "\nrandom_trailers=true"
+	}
+	if profile.AWG.DisableCookies {
+		cmd += "\ndisable_cookies=true"
+	}
 
 	// Peer section
-	cmd += fmt.Sprintf("\nreplace_peers=true\npublic_key=%s\nendpoint=%s:%s\nallowed_ip=0.0.0.0/0\nallowed_ip=::/0\npersistent_keepalive_interval=25",
-		pubHex, hostIP, port)
+	pka := profile.AWG.PersistentKeepalive
+	if pka == "" {
+		pka = "25"
+	}
+	cmd += fmt.Sprintf("\nreplace_peers=true\npublic_key=%s\nendpoint=%s:%s\nallowed_ip=0.0.0.0/0\nallowed_ip=::/0\npersistent_keepalive_interval=%s",
+		pubHex, hostIP, port, pka)
 
 	return dev.IpcSet(cmd)
 }

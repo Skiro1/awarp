@@ -1,7 +1,7 @@
-github.com/amnezia-vpn/amneziawg-go v0.2.17-0.20260601143056-948c55579489 h1:2wx8yWsQSuVj+xslMbcZBg445PjscPT/CXfA+c8xmos=
-github.com/amnezia-vpn/amneziawg-go v0.2.17-0.20260601143056-948c55579489/go.mod h1:Nb9eVpad0fzQzFVJejqaYEkNRW4jE56fkShQKCsQdIQ=
-github.com/amnezia-vpn/amneziawg-windows v0.1.9 h1:lz/aNZkkglUpBXub76TrTybnodrNxEoJwwJghFYcVhg=
-github.com/amnezia-vpn/amneziawg-windows v0.1.9/go.mod h1:BdfpKW9+fZdnGpne7h8uidaheypncIQ5vG7oerRDnaw=
+github.com/amnezia-vpn/amneziawg-go/v3 v3.1.20260828 h1:D8d8gGvwXcTxUIsE4z6F6vjy4/VZddu95vMNtOygh1c=
+github.com/amnezia-vpn/amneziawg-go/v3 v3.1.20260828/go.mod h1:YoPc6qcOZqD7TXZ1xpedD8Sx3aSKsxN05ZqEFmXDNHk=
+github.com/amnezia-vpn/amneziawg-windows/v3 v3.1.20260814 h1:R5J1awr5at7/4kHFPZaN0zeLKW1/zR/E37lhMgnsyD0=
+github.com/amnezia-vpn/amneziawg-windows/v3 v3.1.20260814/go.mod h1:ocoNVSEDXeB043g3sX+pBxG2CB+LN0WZdw9FGrQK5H4=
 github.com/andybalholm/brotli v1.0.6 h1:Yf9fFpf49Zrxb9NlQaluyE92/+X7UVHlhMNJN2sxfOI=
 github.com/andybalholm/brotli v1.0.6/go.mod h1:fO7iG3H7G2nSZ7m0zPUDn85XEX2GTukHGRSepvi9Eig=
 github.com/google/btree v1.1.3 h1:CVpQJjYgC4VbzxeGVHfvZrv1ctoYCAI8vbl07Fcxlyg=

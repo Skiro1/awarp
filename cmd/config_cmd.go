@@ -38,6 +38,14 @@ func ConfigSet(profileName string, awgArgs []string, endpoint string) error {
 		changed = true
 	}
 
+	// Warn if the profile now targets Cloudflare WARP with AWG options it cannot use.
+	warpTarget := config.IsWarpEndpoint(profile.Endpoint)
+	if changed && warpTarget {
+		for _, w := range config.WarpUnsafeAWG(profile.AWG) {
+			fmt.Printf("WARNING: %s — incompatible with Cloudflare WARP\n", w)
+		}
+	}
+
 	if !changed {
 		fmt.Println("Nothing to change. Use --endpoint or --set-awg.")
 		return nil
@@ -128,6 +136,28 @@ func printAWGConfig(awg config.AWGConfig) {
 	if hasI {
 		fmt.Println()
 	}
+
+	printStr := func(name, v string) {
+		if v != "" {
+			fmt.Printf("  %s=%s\n", name, v)
+		}
+	}
+	printStr("header_protection_key", awg.HeaderProtectionKey)
+	printStr("content_padding_addition", awg.ContentPaddingAddition)
+	printStr("rekey_after_time", awg.RekeyAfterTime)
+	printStr("rekey_timeout", awg.RekeyTimeout)
+	printStr("reject_after_time", awg.RejectAfterTime)
+	printStr("keepalive_timeout", awg.KeepaliveTimeout)
+	printStr("max_handshake_attempts", awg.MaxHandshakeAttempts)
+	if awg.RandomTrailers {
+		fmt.Println("  random_trailers=true")
+	}
+	if awg.DisableCookies {
+		fmt.Println("  disable_cookies=true")
+	}
+	if awg.PersistentKeepalive != "" {
+		fmt.Printf("  persistent_keepalive=%s\n", awg.PersistentKeepalive)
+	}
 }
 
 func ParseAWGArgs(args []string) (config.AWGConfig, error) {
@@ -147,6 +177,7 @@ USAGE:
   awarp config set --profile <name> [--endpoint IP:PORT] [--set-awg KEY=VAL ...]
   awarp config profiles
   awarp config delete --profile <name>
+  awarp conf [--profile <name>] [-o file.conf]   export AmneziaWG .conf
   awarp help
 
 AWG PARAMETERS:
@@ -154,6 +185,23 @@ AWG PARAMETERS:
   s1-s4            Message paddings
   h1-h4            Message headers
   i1-i5            Custom signature packets
+  header_protection_key   AWG 3+ header protection key (hex)
+  content_padding_addition  AWG 3+ content padding range, e.g. 10-100
+  rekey_after_time/    AWG 3+ custom timings (seconds range),
+  rekey_timeout        e.g. 120-180
+  reject_after_time
+  keepalive_timeout    keepalive timeout range
+  max_handshake_attempts  handshake retry range
+  persistent_keepalive  keepalive interval or range, e.g. 25 or 25-35
+  random_trailers       AWG 3.1: append random bytes to packets (true/false)
+  disable_cookies       AWG 3.1: disable cookie replies (true/false)
+
+WARP-SAFE:
+  Cloudflare WARP peers are stock WireGuard servers. Client-side options
+  work: jc/jmin/jmax, i1-i5, timings, persistent_keepalive and traffic
+  padding (content_padding_addition, random_trailers, disable_cookies).
+  s1-s4 and header_protection_key change the wire format and break the
+  WARP handshake — a warning is shown when they are set on a WARP endpoint.
 
 FLAGS:
   --community       Use community endpoint list (with scan)
@@ -183,6 +231,7 @@ EXAMPLES:
   awarp scan --full-as                              # scan all AS prefixes
   awarp config set --profile mywarp --endpoint 162.159.192.179:2408
   awarp config set --profile mywarp --set-awg jmin=100
+  awarp conf --profile mywarp -o mywarp.conf   # export .conf (AmneziaWG)
 `
 	fmt.Print(help)
 }

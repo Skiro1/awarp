@@ -6,6 +6,10 @@ type RegisterRequest struct {
 	FCMToken    string `json:"fcm_token"`
 	Referer     string `json:"referer"`
 	WarpEnabled bool   `json:"warp_enabled"`
+	Type        string `json:"type,omitempty"`
+	Model       string `json:"model,omitempty"`
+	Name        string `json:"name,omitempty"`
+	Tos         string `json:"tos,omitempty"`
 	Locale      string `json:"locale"`
 	License     string `json:"license,omitempty"`
 }

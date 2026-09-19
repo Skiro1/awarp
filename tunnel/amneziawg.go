@@ -18,12 +18,12 @@ import (
 
 	"warp-cli/config"
 
-	"github.com/amnezia-vpn/amneziawg-go/conn"
-	"github.com/amnezia-vpn/amneziawg-go/device"
-	"github.com/amnezia-vpn/amneziawg-go/ipc"
-	"github.com/amnezia-vpn/amneziawg-go/ipc/namedpipe"
-	"github.com/amnezia-vpn/amneziawg-go/tun"
-	"github.com/amnezia-vpn/amneziawg-windows/tunnel/winipcfg"
+	"github.com/amnezia-vpn/amneziawg-go/v3/conn"
+	"github.com/amnezia-vpn/amneziawg-go/v3/device"
+	"github.com/amnezia-vpn/amneziawg-go/v3/ipc"
+	"github.com/amnezia-vpn/amneziawg-go/v3/ipc/namedpipe"
+	"github.com/amnezia-vpn/amneziawg-go/v3/tun"
+	"github.com/amnezia-vpn/amneziawg-windows/v3/tunnel/winipcfg"
 	"golang.org/x/sys/windows"
 )
 
@@ -230,13 +230,11 @@ func (t *Tunnel) Start(profile *config.Profile) error {
 	}
 
 	// Bind UDP socket to physical interface (like official client)
-	if mb, ok := t.dev.Bind().(*conn.Multibind); ok {
-		if binder, ok := mb.Bind.(conn.BindSocketToInterface); ok {
-			if phyIdx := findPhysicalInterfaceIndex(t.tun); phyIdx != 0 {
-				t.logger.Verbosef("Binding socket to physical interface index %d", phyIdx)
-				if err := binder.BindSocketToInterface4(phyIdx, false); err != nil {
-					t.logger.Verbosef("WARNING: BindSocketToInterface4: %v", err)
-				}
+	if binder, ok := t.dev.Bind().(conn.BindSocketToInterface); ok {
+		if phyIdx := findPhysicalInterfaceIndex(t.tun); phyIdx != 0 {
+			t.logger.Verbosef("Binding socket to physical interface index %d", phyIdx)
+			if err := binder.BindSocketToInterface4(phyIdx, false); err != nil {
+				t.logger.Verbosef("WARNING: BindSocketToInterface4: %v", err)
 			}
 		}
 	}
@@ -343,6 +341,8 @@ func (t *Tunnel) configure(profile *config.Profile) error {
 	fmt.Fprintf(&cmd, "jmax=%d\n", awg.Jmax)
 	fmt.Fprintf(&cmd, "s1=%d\n", awg.S1)
 	fmt.Fprintf(&cmd, "s2=%d\n", awg.S2)
+	fmt.Fprintf(&cmd, "s3=%d\n", awg.S3)
+	fmt.Fprintf(&cmd, "s4=%d\n", awg.S4)
 	if awg.H1 != "" && awg.H1 != "0" {
 		fmt.Fprintf(&cmd, "h1=%s\n", awg.H1)
 	}
@@ -359,6 +359,33 @@ func (t *Tunnel) configure(profile *config.Profile) error {
 		if v != "" {
 			fmt.Fprintf(&cmd, "i%d=%s\n", i+1, v)
 		}
+	}
+	if awg.HeaderProtectionKey != "" {
+		fmt.Fprintf(&cmd, "header_protection_key=%s\n", awg.HeaderProtectionKey)
+	}
+	if awg.ContentPaddingAddition != "" {
+		fmt.Fprintf(&cmd, "content_padding_addition=%s\n", awg.ContentPaddingAddition)
+	}
+	if awg.RekeyAfterTime != "" {
+		fmt.Fprintf(&cmd, "rekey_after_time=%s\n", awg.RekeyAfterTime)
+	}
+	if awg.RekeyTimeout != "" {
+		fmt.Fprintf(&cmd, "rekey_timeout=%s\n", awg.RekeyTimeout)
+	}
+	if awg.RejectAfterTime != "" {
+		fmt.Fprintf(&cmd, "reject_after_time=%s\n", awg.RejectAfterTime)
+	}
+	if awg.KeepaliveTimeout != "" {
+		fmt.Fprintf(&cmd, "keepalive_timeout=%s\n", awg.KeepaliveTimeout)
+	}
+	if awg.MaxHandshakeAttempts != "" {
+		fmt.Fprintf(&cmd, "max_handshake_attempts=%s\n", awg.MaxHandshakeAttempts)
+	}
+	if awg.RandomTrailers {
+		fmt.Fprintf(&cmd, "random_trailers=true\n")
+	}
+	if awg.DisableCookies {
+		fmt.Fprintf(&cmd, "disable_cookies=true\n")
 	}
 
 	pubHex, err := b64toHex(profile.PublicKey)
@@ -385,7 +412,11 @@ func (t *Tunnel) configure(profile *config.Profile) error {
 
 	cmd.WriteString("allowed_ip=0.0.0.0/0\n")
 	cmd.WriteString("allowed_ip=::/0\n")
-	cmd.WriteString("persistent_keepalive_interval=25\n")
+	pka := awg.PersistentKeepalive
+	if pka == "" {
+		pka = "25"
+	}
+	fmt.Fprintf(&cmd, "persistent_keepalive_interval=%s\n", pka)
 	cmd.WriteString("\n")
 
 	if _, err := conn.Write([]byte(cmd.String())); err != nil {
@@ -671,9 +702,17 @@ func ParseAWGArgs(args []string) (config.AWGConfig, error) {
 			}
 			awg.S2 = v
 		case "s3":
-			// not supported in v1.0.4, silently ignore
+			v, err := strconv.Atoi(val)
+			if err != nil {
+				return awg, fmt.Errorf("invalid value for %s: %q is not a number", key, val)
+			}
+			awg.S3 = v
 		case "s4":
-			// not supported in v1.0.4, silently ignore
+			v, err := strconv.Atoi(val)
+			if err != nil {
+				return awg, fmt.Errorf("invalid value for %s: %q is not a number", key, val)
+			}
+			awg.S4 = v
 		case "h1":
 			if val == "0" {
 				awg.H1 = ""
@@ -708,6 +747,29 @@ func ParseAWGArgs(args []string) (config.AWGConfig, error) {
 			awg.I4 = val
 		case "i5":
 			awg.I5 = val
+		case "header_protection_key":
+			awg.HeaderProtectionKey = val
+		case "content_padding_addition":
+			awg.ContentPaddingAddition = val
+		case "rekey_after_time":
+			awg.RekeyAfterTime = val
+		case "rekey_timeout":
+			awg.RekeyTimeout = val
+		case "reject_after_time":
+			awg.RejectAfterTime = val
+		case "keepalive_timeout":
+			awg.KeepaliveTimeout = val
+		case "max_handshake_attempts":
+			awg.MaxHandshakeAttempts = val
+		case "random_trailers":
+			awg.RandomTrailers = val == "true" || val == "1"
+		case "disable_cookies":
+			awg.DisableCookies = val == "true" || val == "1"
+		case "persistent_keepalive":
+			if val == "" {
+				return awg, fmt.Errorf("empty value for %s", key)
+			}
+			awg.PersistentKeepalive = val
 		default:
 			return awg, fmt.Errorf("unknown AWG param: %s", key)
 		}

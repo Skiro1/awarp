@@ -16,9 +16,9 @@ func Status(profileName string) error {
 	fmt.Printf("Address:  %s\n", profile.Address)
 	fmt.Printf("DNS:      %s\n", profile.DNS)
 	fmt.Printf("Endpoint: %s\n", profile.Endpoint)
-	fmt.Printf("AWG:      jc=%d jmin=%d jmax=%d s1=%d s2=%d\n",
+	fmt.Printf("AWG:      jc=%d jmin=%d jmax=%d s1=%d s2=%d s3=%d s4=%d\n",
 		profile.AWG.Jc, profile.AWG.Jmin, profile.AWG.Jmax,
-		profile.AWG.S1, profile.AWG.S2)
+		profile.AWG.S1, profile.AWG.S2, profile.AWG.S3, profile.AWG.S4)
 	fmt.Println()
 
 	if err := tunnel.Status(profile); err != nil {

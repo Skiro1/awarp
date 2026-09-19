@@ -64,6 +64,13 @@ func main() {
 	case "config":
 		handleConfig(args)
 
+	case "conf", "export":
+		profile := flagValue(args, "--profile", "-p", "warp")
+		output := flagValue(args, "--output", "-o", "")
+		if err := cmd.ExportConf(profile, output); err != nil {
+			errExit(err)
+		}
+
 	case "scan":
 		_, _, _, _, _, community, _, fast, awg, _, fullAS := parseFlags(args)
 		if err := cmd.ScanEndpoints(community, fast, awg, fullAS); err != nil {
@@ -163,4 +170,18 @@ func parseFlags(args []string) (profile string, license string, awgArgs []string
 func errExit(err error) {
 	fmt.Fprintf(os.Stderr, "Error: %v\n", err)
 	os.Exit(1)
+}
+
+// flagValue returns the value of the first matching flag (long or short) in
+// args, or def when absent.
+func flagValue(args []string, long, short, def string) string {
+	for i := 0; i < len(args); i++ {
+		if args[i] == long || (short != "" && args[i] == short) {
+			if i+1 < len(args) {
+				return args[i+1]
+			}
+			return ""
+		}
+	}
+	return def
 }
